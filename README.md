@@ -8,7 +8,7 @@ This package is meant to be a simple wrapper to invoke a WASM (WASI) binary with
 
 It is as much to help me understand the boundaries of what is or isn't possible with Go and WASM (WASI) right now. Under the hood it relies on the [tetratelabs/wazero](https://github.com/tetratelabs/wazero) package for doing all the heavy lifting.
 
-In order to compile WASI binaries you will need to install and build [tinygo](https://tinygo.org) and you should consider that there is still quite a lot of the standard Go programming language that tinygo [does not support yet](https://tinygo.org/docs/reference/lang-support/).
+In order to compile WASI binaries derived from Go code you will need to install and build [tinygo](https://tinygo.org) and you should consider that there is still quite a lot of the standard Go programming language that tinygo [does not support yet](https://tinygo.org/docs/reference/lang-support/).
 
 ## Example
 
