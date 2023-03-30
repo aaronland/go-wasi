@@ -127,14 +127,16 @@ func ValueTypeName(t ValueType) string {
 	return "unknown"
 }
 
-// Module return functions exported in a module, post-instantiation.
+// Module is a sandboxed, ready to execute Wasm module. This can be used to get exported functions, etc.
+//
+// In WebAssembly terminology, this corresponds to a "Module Instance", but wazero calls pre-instantiation module as
+// "Compiled Module" as in wazero.CompiledModule, therefore we call this post-instantiation module simply "Module".
+// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#module-instances%E2%91%A0
 //
 // # Notes
 //
 //   - Closing the wazero.Runtime closes any Module it instantiated.
 //   - This is an interface for decoupling, not third-party implementations. All implementations are in wazero.
-//
-// See https://www.w3.org/TR/2019/REC-wasm-core-1-20191205/#external-types%E2%91%A0
 type Module interface {
 	fmt.Stringer
 
@@ -175,7 +177,7 @@ type Module interface {
 	// failure to ExportedFunction callers.
 	//
 	// The error returned here, if present, is about resource de-allocation (such as I/O errors). Only the last error is
-	// returned, so a non-nil return means at least one error happened. Regardless of error, this module instance will
+	// returned, so a non-nil return means at least one error happened. Regardless of error, this Module will
 	// be removed, making its name available again.
 	//
 	// Calling this inside a host function is safe, and may cause ExportedFunction callers to receive a sys.ExitError
@@ -187,10 +189,12 @@ type Module interface {
 }
 
 // Closer closes a resource.
-//
-// Note: This is an interface for decoupling, not third-party implementations. All implementations are in wazero.
 type Closer interface {
 	// Close closes the resource.
+	//
+	// Note: The context parameter is used for value lookup, such as for
+	// logging. A canceled or otherwise done context will not prevent Close
+	// from succeeding.
 	Close(context.Context) error
 }
 
@@ -318,6 +322,12 @@ type Function interface {
 	//
 	// To safely encode/decode params/results expressed as uint64, users are encouraged to
 	// use api.EncodeXXX or DecodeXXX functions. See the docs on api.ValueType.
+	//
+	// When RuntimeConfig.WithCloseOnContextDone is toggled, the invocation of this Call method is ensured to be closed
+	// whenever one of the three conditions is met. In the event of close, sys.ExitError will be returned and
+	// the api.Module from which this api.Function is derived will be made closed. See the documentation of
+	// WithCloseOnContextDone on wazero.RuntimeConfig for detail. See examples in context_done_example_test.go for
+	// the end-to-end demonstrations of how these terminations can be performed.
 	Call(ctx context.Context, params ...uint64) ([]uint64, error)
 }
 

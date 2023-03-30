@@ -8,7 +8,16 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"strings"
 )
+
+// TODO: IsAtLeastGo120
+var IsGo120 = strings.Contains(runtime.Version(), "go1.20")
+
+// archRequirementsVerified is set by platform-specific init to true if the platform is supported
+var archRequirementsVerified bool
+
+var _zero uintptr
 
 // CompilerSupported is exported for tests and includes constraints here and also the assembler.
 func CompilerSupported() bool {
@@ -18,13 +27,7 @@ func CompilerSupported() bool {
 		return false
 	}
 
-	switch runtime.GOARCH {
-	case "amd64", "arm64":
-	default:
-		return false
-	}
-
-	return true
+	return archRequirementsVerified
 }
 
 // MmapCodeSegment copies the code into the executable region and returns the byte slice of the region.
@@ -47,9 +50,4 @@ func MunmapCodeSegment(code []byte) error {
 		panic(errors.New("BUG: MunmapCodeSegment with zero length"))
 	}
 	return munmapCodeSegment(code)
-}
-
-// IsTerminal returns true if the given file descriptor is a terminal.
-func IsTerminal(fd uintptr) bool {
-	return isTerminal(fd)
 }
