@@ -128,6 +128,27 @@ type RuntimeConfig interface {
 	//	c, err := r.CompileModule(ctx, wasm)
 	//	customSections := c.CustomSections()
 	WithCustomSections(bool) RuntimeConfig
+
+	// WithCloseOnContextDone ensures the executions of functions to be closed under one of the following circumstances:
+	//
+	// 	- context.Context passed to the Call method of api.Function is canceled during execution. (i.e. ctx by context.WithCancel)
+	// 	- context.Context passed to the Call method of api.Function reaches timeout during execution. (i.e. ctx by context.WithTimeout or context.WithDeadline)
+	// 	- Close or CloseWithExitCode of api.Module is explicitly called during execution.
+	//
+	// This is especially useful when one wants to run untrusted Wasm binaries since otherwise, any invocation of
+	// api.Function can potentially block the corresponding Goroutine forever. Moreover, it might block the
+	// entire underlying OS thread which runs the api.Function call. See "Why it's safe to execute runtime-generated
+	// machine codes against async Goroutine preemption" section in internal/engine/compiler/RATIONALE.md for detail.
+	//
+	// Note that this comes with a bit of extra cost when enabled. The reason is that internally this forces
+	// interpreter and compiler runtimes to insert the periodical checks on the conditions above. For that reason,
+	// this is disabled by default.
+	//
+	// See examples in context_done_example_test.go for the end-to-end demonstrations.
+	//
+	// When the invocations of api.Function are closed due to this, sys.ExitError is raised to the callers and
+	// the api.Module from which the functions are derived is made closed.
+	WithCloseOnContextDone(bool) RuntimeConfig
 }
 
 // NewRuntimeConfig returns a RuntimeConfig using the compiler if it is supported in this environment,
@@ -147,6 +168,7 @@ type runtimeConfig struct {
 	newEngine             newEngine
 	cache                 CompilationCache
 	storeCustomSections   bool
+	ensureTermination     bool
 }
 
 // engineLessConfig helps avoid copy/pasting the wrong defaults.
@@ -204,6 +226,13 @@ func (c *runtimeConfig) clone() *runtimeConfig {
 func (c *runtimeConfig) WithCoreFeatures(features api.CoreFeatures) RuntimeConfig {
 	ret := c.clone()
 	ret.enabledFeatures = features
+	return ret
+}
+
+// WithCloseOnContextDone implements RuntimeConfig.WithCloseOnContextDone
+func (c *runtimeConfig) WithCloseOnContextDone(ensure bool) RuntimeConfig {
+	ret := c.clone()
+	ret.ensureTermination = ensure
 	return ret
 }
 
@@ -304,6 +333,7 @@ type compiledModule struct {
 	compiledEngine wasm.Engine
 	// closeWithModule prevents leaking compiled code when a module is compiled implicitly.
 	closeWithModule bool
+	typeIDs         []wasm.FunctionTypeID
 }
 
 // Name implements CompiledModule.Name
@@ -376,7 +406,7 @@ func (c *customSection) Data() []byte {
 //	config := wazero.NewModuleConfig().WithStdout(buf).WithSysNanotime()
 //
 //	// Assign different configuration on each instantiation
-//	module, _ := r.InstantiateModule(ctx, compiled, config.WithName("rotate").WithArgs("rotate", "angle=90", "dir=cw"))
+//	mod, _ := r.InstantiateModule(ctx, compiled, config.WithName("rotate").WithArgs("rotate", "angle=90", "dir=cw"))
 //
 // While wazero supports Windows as a platform, host functions using ModuleConfig follow a UNIX dialect.
 // See RATIONALE.md for design background and relationship to WebAssembly System Interfaces (WASI).
@@ -425,7 +455,7 @@ type ModuleConfig interface {
 	WithFSConfig(FSConfig) ModuleConfig
 
 	// WithName configures the module name. Defaults to what was decoded from
-	// the name section.
+	// the name section. Empty string ("") clears any name.
 	WithName(string) ModuleConfig
 
 	// WithStartFunctions configures the functions to call after the module is
@@ -479,8 +509,9 @@ type ModuleConfig interface {
 	WithStdout(io.Writer) ModuleConfig
 
 	// WithWalltime configures the wall clock, sometimes referred to as the
-	// real time clock. Defaults to a fake result that increases by 1ms on
-	// each reading.
+	// real time clock. sys.Walltime returns the current unix/epoch time,
+	// seconds since midnight UTC 1 January 1970, with a nanosecond fraction.
+	// This defaults to a fake result that increases by 1ms on each reading.
 	//
 	// Here's an example that uses a custom clock:
 	//	moduleConfig = moduleConfig.
@@ -488,8 +519,11 @@ type ModuleConfig interface {
 	//			return clock.walltime()
 	//		}, sys.ClockResolution(time.Microsecond.Nanoseconds()))
 	//
-	// Note: This does not default to time.Now as that violates sandboxing. Use
-	// WithSysWalltime for a usable implementation.
+	// # Notes:
+	//   - This does not default to time.Now as that violates sandboxing.
+	//   - This is used to implement host functions such as WASI
+	//     `clock_time_get` with the `realtime` clock ID.
+	//   - Use WithSysWalltime for a usable implementation.
 	WithWalltime(sys.Walltime, sys.ClockResolution) ModuleConfig
 
 	// WithSysWalltime uses time.Now for sys.Walltime with a resolution of 1us
@@ -510,6 +544,8 @@ type ModuleConfig interface {
 	//
 	// # Notes:
 	//   - This does not default to time.Since as that violates sandboxing.
+	//   - This is used to implement host functions such as WASI
+	//     `clock_time_get` with the `monotonic` clock ID.
 	//   - Some compilers implement sleep by looping on sys.Nanotime (e.g. Go).
 	//   - If you set this, you should probably set WithNanosleep also.
 	//   - Use WithSysNanotime for a usable implementation.
@@ -525,7 +561,7 @@ type ModuleConfig interface {
 	//
 	// This example uses a custom sleep function:
 	//	moduleConfig = moduleConfig.
-	//		WithNanosleep(func(ctx context.Context, ns int64) {
+	//		WithNanosleep(func(ns int64) {
 	//			rel := unix.NsecToTimespec(ns)
 	//			remain := unix.Timespec{}
 	//			for { // loop until no more time remaining
@@ -533,12 +569,20 @@ type ModuleConfig interface {
 	//			--snip--
 	//
 	// # Notes:
-	//   - This primarily supports `poll_oneoff` for relative clock events.
 	//   - This does not default to time.Sleep as that violates sandboxing.
+	//   - This is used to implement host functions such as WASI `poll_oneoff`.
 	//   - Some compilers implement sleep by looping on sys.Nanotime (e.g. Go).
 	//   - If you set this, you should probably set WithNanotime also.
 	//   - Use WithSysNanosleep for a usable implementation.
 	WithNanosleep(sys.Nanosleep) ModuleConfig
+
+	// WithOsyield yields the processor, typically to implement spin-wait
+	// loops. Defaults to return immediately.
+	//
+	// # Notes:
+	//   - This primarily supports `sched_yield` in WASI
+	//   - This does not default to runtime.osyield as that violates sandboxing.
+	WithOsyield(sys.Osyield) ModuleConfig
 
 	// WithSysNanosleep uses time.Sleep for sys.Nanosleep.
 	//
@@ -559,6 +603,7 @@ type ModuleConfig interface {
 
 type moduleConfig struct {
 	name               string
+	nameSet            bool
 	startFunctions     []string
 	stdin              io.Reader
 	stdout             io.Writer
@@ -569,6 +614,7 @@ type moduleConfig struct {
 	nanotime           *sys.Nanotime
 	nanotimeResolution sys.ClockResolution
 	nanosleep          *sys.Nanosleep
+	osyield            *sys.Osyield
 	args               [][]byte
 	// environ is pair-indexed to retain order similar to os.Environ.
 	environ [][]byte
@@ -629,7 +675,11 @@ func (c *moduleConfig) WithEnv(key, value string) ModuleConfig {
 
 // WithFS implements ModuleConfig.WithFS
 func (c *moduleConfig) WithFS(fs fs.FS) ModuleConfig {
-	return c.WithFSConfig(NewFSConfig().WithFSMount(fs, ""))
+	var config FSConfig
+	if fs != nil {
+		config = NewFSConfig().WithFSMount(fs, "")
+	}
+	return c.WithFSConfig(config)
 }
 
 // WithFSConfig implements ModuleConfig.WithFSConfig
@@ -642,6 +692,7 @@ func (c *moduleConfig) WithFSConfig(config FSConfig) ModuleConfig {
 // WithName implements ModuleConfig.WithName
 func (c *moduleConfig) WithName(name string) ModuleConfig {
 	ret := c.clone()
+	ret.nameSet = true
 	ret.name = name
 	return ret
 }
@@ -711,6 +762,13 @@ func (c *moduleConfig) WithNanosleep(nanosleep sys.Nanosleep) ModuleConfig {
 	return &ret
 }
 
+// WithOsyield implements ModuleConfig.WithOsyield
+func (c *moduleConfig) WithOsyield(osyield sys.Osyield) ModuleConfig {
+	ret := *c // copy
+	ret.osyield = &osyield
+	return &ret
+}
+
 // WithSysNanosleep implements ModuleConfig.WithSysNanosleep
 func (c *moduleConfig) WithSysNanosleep() ModuleConfig {
 	return c.WithNanosleep(platform.Nanosleep)
@@ -767,7 +825,7 @@ func (c *moduleConfig) toSysContext() (sysCtx *internalsys.Context, err error) {
 		c.randSource,
 		c.walltime, c.walltimeResolution,
 		c.nanotime, c.nanotimeResolution,
-		c.nanosleep,
+		c.nanosleep, c.osyield,
 		fs,
 	)
 }

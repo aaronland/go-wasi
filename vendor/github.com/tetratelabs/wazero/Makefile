@@ -1,14 +1,10 @@
 
-# Make functions strip spaces and use commas to separate parameters. The below variables escape these characters.
-comma := ,
-space :=
-space +=
-
-gofumpt := mvdan.cc/gofumpt@v0.4.0
-gosimports := github.com/rinchsan/gosimports/cmd/gosimports@v0.3.4
-golangci_lint := github.com/golangci/golangci-lint/cmd/golangci-lint@v1.50.1
+gofumpt       := mvdan.cc/gofumpt@v0.4.0
+gosimports    := github.com/rinchsan/gosimports/cmd/gosimports@v0.3.7
+golangci_lint := github.com/golangci/golangci-lint/cmd/golangci-lint@v1.51.2
+asmfmt        := github.com/klauspost/asmfmt/cmd/asmfmt@v1.3.2
 # sync this with netlify.toml!
-hugo          := github.com/gohugoio/hugo@v0.105.0
+hugo          := github.com/gohugoio/hugo@v0.111.2
 
 # Make 3.81 doesn't support '**' globbing: Set explicitly instead of recursion.
 all_sources   := $(wildcard *.go */*.go */*/*.go */*/*/*.go */*/*/*.go */*/*/*/*.go)
@@ -23,7 +19,7 @@ main_sources  := $(wildcard $(filter-out %_test.go $(all_testdata) $(all_testing
 main_packages := $(sort $(foreach f,$(dir $(main_sources)),$(if $(findstring ./,$(f)),./,./$(f))))
 
 # By default, we don't run with -race as it's costly to run on every PR.
-go_test_options ?= -timeout 120s
+go_test_options ?= -timeout 300s
 
 ensureCompilerFastest := -ldflags '-X github.com/tetratelabs/wazero/internal/integration_test/vs.ensureCompilerFastest=true'
 .PHONY: bench
@@ -48,14 +44,14 @@ build.bench:
 
 .PHONY: test.examples
 test.examples:
-	@go test $(go_test_options) ./examples/... ./imports/assemblyscript/example/... ./imports/emscripten/... ./imports/go/example/... ./imports/wasi_snapshot_preview1/example/...
+	@go test $(go_test_options) ./examples/... ./imports/assemblyscript/example/... ./imports/emscripten/... ./experimental/gojs/example/... ./imports/wasi_snapshot_preview1/example/...
 
 .PHONY: build.examples.as
 build.examples.as:
 	@cd ./imports/assemblyscript/example/testdata && npm install && npm run build
 
 %.wasm: %.zig
-	@(cd $(@D); zig build -Drelease-small=true)
+	@(cd $(@D); zig build -Doptimize=ReleaseSmall)
 	@mv $(@D)/zig-out/*/$(@F) $(@D)
 
 .PHONY: build.examples.zig
@@ -68,8 +64,6 @@ build.examples.tinygo: $(tinygo_sources)
 	@for f in $^; do \
 	    tinygo build -o $$(echo $$f | sed -e 's/\.go/\.wasm/') -scheduler=none --no-debug --target=wasi $$f; \
 	done
-	# Need DWARF sections.
-	tinygo build -o internal/testing/dwarftestdata/testdata/tinygo/main.wasm -scheduler=none --target=wasi internal/testing/dwarftestdata/testdata/tinygo/main.go
 
 # We use zig to build C as it is easy to install and embeds a copy of zig-cc.
 c_sources := imports/wasi_snapshot_preview1/example/testdata/zig-cc/cat.c imports/wasi_snapshot_preview1/testdata/zig-cc/wasi.c
@@ -181,7 +175,8 @@ test:
 	@cd internal/version/testdata && go test $(go_test_options) ./...
 
 .PHONY: coverage
-coverpkg = $(subst $(space),$(comma),$(main_packages))
+# replace spaces with commas
+coverpkg = $(shell echo $(main_packages) | tr ' ' ',')
 coverage: ## Generate test coverage
 	@go test -coverprofile=coverage.txt -covermode=atomic --coverpkg=$(coverpkg) $(main_packages)
 	@go tool cover -func coverage.txt
@@ -212,6 +207,7 @@ lint: $(golangci_lint_path)
 format:
 	@go run $(gofumpt) -l -w .
 	@go run $(gosimports) -local github.com/tetratelabs/ -w $(shell find . -name '*.go' -type f)
+	@go run $(asmfmt) -w $(shell find . -name '*.s' -type f)
 
 .PHONY: check  # Pre-flight check for pull requests
 check:
@@ -220,8 +216,13 @@ check:
 # This makes sure the intepreter can be used. Most often the package that can
 # drift here is "platform" or "sysfs":
 #
-# Ensure we build on an arbitrary operating system
+# Ensure we build on windows:
+	@GOARCH=amd64 GOOS=windows go build ./...
+# Ensure we build on an arbitrary operating system:
 	@GOARCH=amd64 GOOS=dragonfly go build ./...
+# Ensure we build on solaris/illumos:
+	@GOARCH=amd64 GOOS=illumos go build ./...
+	@GOARCH=amd64 GOOS=solaris go build ./...
 # Ensure we build on linux arm for Dapr:
 #	gh release view -R dapr/dapr --json assets --jq 'first(.assets[] | select(.name = "daprd_linux_arm.tar.gz") | {url, downloadCount})'
 	@GOARCH=arm GOOS=linux go build ./...
@@ -256,3 +257,90 @@ fuzz:
 	@cd internal/integration_test/fuzz && cargo fuzz run basic -- -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run memory_no_diff -- -max_total_time=$(fuzz_timeout_seconds)
 	@cd internal/integration_test/fuzz && cargo fuzz run validation -- -max_total_time=$(fuzz_timeout_seconds)
+
+#### CLI release related ####
+
+VERSION ?= dev
+# Default to a dummy version 0.0.1.rc1, which is always lower than a real release.
+# This must be in the form of [0-255].[0-255].[0-65535] plus optional fourth element which will be ignored.
+# We use the fourth field to represent the rc portion of release tag (e.g. rc1 of 1.0.0-rc2).
+# https://learn.microsoft.com/en-us/windows/win32/msi/productversion?redirectedfrom=MSDN
+# https://stackoverflow.com/questions/9312221/msi-version-numbers
+MSI_VERSION ?= 0.0.1.rc1
+non_windows_platforms := darwin_amd64 darwin_arm64 linux_amd64 linux_arm64
+non_windows_archives  := $(non_windows_platforms:%=dist/wazero_$(VERSION)_%.tar.gz)
+windows_platforms     := windows_amd64 # TODO: add arm64 windows once we start testing on it.
+windows_archives      := $(windows_platforms:%=dist/wazero_$(VERSION)_%.zip) $(windows_platforms:%=dist/wazero_$(VERSION)_%.msi)
+checksum_txt          := dist/wazero_$(VERSION)_checksums.txt
+
+# define macros for multi-platform builds. these parse the filename being built
+go-arch = $(if $(findstring amd64,$1),amd64,arm64)
+go-os   = $(if $(findstring .exe,$1),windows,$(if $(findstring linux,$1),linux,darwin))
+# msi-arch is a macro so we can detect it based on the file naming convention
+msi-arch     = $(if $(findstring amd64,$1),x64,arm64)
+
+build/wazero_%/wazero:
+	$(call go-build,$@,$<)
+
+build/wazero_%/wazero.exe:
+	$(call go-build,$@,$<)
+
+dist/wazero_$(VERSION)_%.tar.gz: build/wazero_%/wazero
+	@echo tar.gz "tarring $@"
+	@mkdir -p $(@D)
+	@tar -C $(<D) -cpzf $@ $(<F)
+	@echo tar.gz "ok"
+
+define go-build
+	@echo "building $1"
+	@# $(go:go=) removes the trailing 'go', so we can insert cross-build variables
+	@$(go:go=) CGO_ENABLED=0 GOOS=$(call go-os,$1) GOARCH=$(call go-arch,$1) go build \
+		-ldflags "-s -w -X github.com/tetratelabs/wazero/internal/version.version=$(VERSION)" \
+		-o $1 $2 ./cmd/wazero
+	@echo build "ok"
+endef
+
+# this makes a marker file ending in .signed to avoid repeatedly calling codesign
+%.signed: %
+	$(call codesign,$<)
+	@touch $@
+
+# This requires osslsigncode package (apt or brew) or latest windows release from mtrojnar/osslsigncode
+#
+# Default is self-signed while production should be a Digicert signing key
+#
+# Ex.
+# ```bash
+# keytool -genkey -alias wazero -storetype PKCS12 -keyalg RSA -keysize 2048 -storepass wazero-bunch \
+# -keystore wazero.p12 -dname "O=wazero,CN=wazero.io" -validity 3650
+# ```
+WINDOWS_CODESIGN_P12      ?= packaging/msi/wazero.p12
+WINDOWS_CODESIGN_PASSWORD ?= wazero-bunch
+define codesign
+	@printf "$(ansi_format_dark)" codesign "signing $1"
+	@osslsigncode sign -h sha256 -pkcs12 ${WINDOWS_CODESIGN_P12} -pass "${WINDOWS_CODESIGN_PASSWORD}" \
+	-n "wazero is the zero dependency WebAssembly runtime for Go developers" -i https://wazero.io -t http://timestamp.digicert.com \
+	$(if $(findstring msi,$(1)),-add-msi-dse) -in $1 -out $1-signed
+	@mv $1-signed $1
+	@printf "$(ansi_format_bright)" codesign "ok"
+endef
+
+dist/wazero_$(VERSION)_%.msi: build/wazero_%/wazero.exe.signed
+	@echo msi "building $@"
+	@mkdir -p $(@D)
+	@wixl -a $(call msi-arch,$@) -D Version=$(MSI_VERSION) -D Bin=$(<:.signed=) -o $@ packaging/msi/wazero.wxs
+	$(call codesign,$@)
+	@echo msi "ok"
+
+dist/wazero_$(VERSION)_%.zip: build/wazero_%/wazero.exe.signed
+	@echo zip "zipping $@"
+	@mkdir -p $(@D)
+	@zip -qj $@ $(<:.signed=)
+	@echo zip "ok"
+
+# Darwin doesn't have sha256sum. See https://github.com/actions/virtual-environments/issues/90
+sha256sum := $(if $(findstring darwin,$(shell go env GOOS)),shasum -a 256,sha256sum)
+$(checksum_txt):
+	@cd $(@D); touch $(@F); $(sha256sum) * >> $(@F)
+
+dist: $(non_windows_archives) $(windows_archives) $(checksum_txt)

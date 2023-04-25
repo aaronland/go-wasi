@@ -1,13 +1,39 @@
-//go:build !((amd64 || arm64 || riscv64) && linux) && !((amd64 || arm64) && (darwin || freebsd)) && !((amd64 || arm64) && windows)
+//go:build (!((amd64 || arm64 || riscv64) && linux) && !((amd64 || arm64) && (darwin || freebsd)) && !((amd64 || arm64) && windows)) || js
 
 package platform
 
-import "os"
+import (
+	"io/fs"
+	"os"
+	"syscall"
+)
 
-func statTimes(t os.FileInfo) (atimeNsec, mtimeNsec, ctimeNsec int64) {
-	return mtimes(t)
+func lstat(path string) (Stat_t, syscall.Errno) {
+	t, err := os.Lstat(path)
+	if errno := UnwrapOSError(err); errno == 0 {
+		return statFromFileInfo(t), 0
+	} else {
+		return Stat_t{}, errno
+	}
 }
 
-func statDeviceInode(t os.FileInfo) (dev, inode uint64) {
+func stat(path string) (Stat_t, syscall.Errno) {
+	t, err := os.Stat(path)
+	if errno := UnwrapOSError(err); errno == 0 {
+		return statFromFileInfo(t), 0
+	} else {
+		return Stat_t{}, errno
+	}
+}
+
+func statFile(f fs.File) (Stat_t, syscall.Errno) {
+	return defaultStatFile(f)
+}
+
+func inoFromFileInfo(_ readdirFile, t fs.FileInfo) (ino uint64, err syscall.Errno) {
 	return
+}
+
+func statFromFileInfo(t fs.FileInfo) Stat_t {
+	return statFromDefaultFileInfo(t)
 }
