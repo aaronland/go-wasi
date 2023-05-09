@@ -1,4 +1,4 @@
-# github.com/tetratelabs/wazero v1.0.1
+# github.com/tetratelabs/wazero v1.1.0
 ## explicit; go 1.18
 github.com/tetratelabs/wazero
 github.com/tetratelabs/wazero/api
@@ -12,6 +12,7 @@ github.com/tetratelabs/wazero/internal/engine/compiler
 github.com/tetratelabs/wazero/internal/engine/interpreter
 github.com/tetratelabs/wazero/internal/filecache
 github.com/tetratelabs/wazero/internal/ieee754
+github.com/tetratelabs/wazero/internal/internalapi
 github.com/tetratelabs/wazero/internal/leb128
 github.com/tetratelabs/wazero/internal/moremath
 github.com/tetratelabs/wazero/internal/platform

@@ -9,7 +9,7 @@ import (
 func TestRun(t *testing.T) {
 
 	ctx := context.Background()
-	
+
 	path_wasm := "wasm/reverse.wasm"
 
 	wasm_r, err := os.Open(path_wasm)
@@ -17,7 +17,7 @@ func TestRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to open %s for reading, %v", path_wasm, err)
 	}
-	
+
 	result, err := Run(ctx, wasm_r, "foo", "bar", "baz")
 
 	if err != nil {
@@ -25,6 +25,6 @@ func TestRun(t *testing.T) {
 	}
 
 	if string(result) != "baz bar foo" {
-		t.Fatalf("Unexpected result from wasm binary, %s", string(result))
+		t.Fatalf("Unexpected result from wasm binary, '%s'", string(result))
 	}
 }
